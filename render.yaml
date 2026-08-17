@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: equipamentos-lancamento-remoto
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: INVITE_CODE_RTEC
+        value: "TROQUE-ESTE-CODIGO-RTEC"
+      - key: INVITE_CODE_ELDORADO
+        value: "TROQUE-ESTE-CODIGO-ELDORADO"
+      # Sem DATABASE_URL, o sistema usa SQLite local - simples, mas o disco
+      # gratuito do Render não é garantido entre deploys. Para dado que não
+      # pode se perder, crie um banco Postgres gratuito e defina DATABASE_URL.
+      # - key: DATABASE_URL
+      #   value: "postgresql://usuario:senha@host/banco"
