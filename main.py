@@ -335,6 +335,22 @@ class Faturamento(Base):
     equipamento = relationship("Equipamento", back_populates="faturamentos")
 
 
+class DespesaExtra(Base):
+    """Despesa que NÃO é de um equipamento específico (diesel, juros de
+    financiamento, outros negócios, etc.) - fica de fora da tabela por
+    equipamento mas entra no acerto de lucro entre as duas empresas.
+    Cada empresa lança a sua, sempre na própria empresa do usuário logado."""
+    __tablename__ = "despesas_extras"
+    id = Column(Integer, primary_key=True)
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"), nullable=False)
+    empresa = Column(String(40), nullable=False)
+    data_despesa = Column(Date, nullable=False)
+    descricao = Column(Text, nullable=False)
+    valor = Column(Float, nullable=False, default=0)
+    criado_em = Column(DateTime, default=datetime.datetime.utcnow)
+    usuario = relationship("Usuario")
+
+
 def seed(db: Session):
     if db.query(Equipamento).count() == 0:
         for nome, ident in EQUIPAMENTOS_SEED:
@@ -437,6 +453,7 @@ TEMPLATES = {
       <a href="/lancamentos">Lançamentos</a>
       <a href="/lancamentos/novo">+ Despesa</a>
       <a href="/faturamentos/novo">+ Faturamento</a>
+      <a href="/despesas-extras/novo">+ Despesa extra</a>
       <a href="/resultado">Resultado</a>
       {% if user.is_admin %}<a href="/usuarios">Usuários</a>{% endif %}
       {% if user.is_admin %}<a href="/equipamentos">Equipamentos</a>{% endif %}
@@ -605,6 +622,25 @@ TEMPLATES = {
 </div>
 {% endblock %}""",
 
+    "despesa_extra_novo.html": """{% extends "base.html" %}
+{% block titulo %}Nova despesa extra{% endblock %}
+{% block conteudo %}
+<div class="card" style="max-width:520px;">
+  <h1>Nova despesa (não é de equipamento)</h1>
+  <p class="sub">Empresa: <span class="badge">{{ user.empresa }}</span> · lançado por {{ user.nome }} · entra no acerto do Resultado, mas não em nenhum equipamento (ex.: diesel, juros de financiamento, outros negócios)</p>
+  {% if erro %}<div class="erro">{{ erro }}</div>{% endif %}
+  <form method="post" action="/despesas-extras/novo">
+    <label>Data</label>
+    <input type="date" name="data_despesa" value="{{ hoje }}" required>
+    <label>Descrição</label>
+    <textarea name="descricao" required placeholder="Ex.: diesel pago em 03/07, juros 2% financiamento escavadeira"></textarea>
+    <label>Valor (R$)</label>
+    <input type="number" name="valor" value="0" min="0" step="0.01" required>
+    <button type="submit">Lançar despesa</button>
+  </form>
+</div>
+{% endblock %}""",
+
     "novo_lancamento.html": """{% extends "base.html" %}
 {% block titulo %}Novo lançamento{% endblock %}
 {% block conteudo %}
@@ -733,12 +769,14 @@ TEMPLATES = {
 {% block titulo %}Resultado{% endblock %}
 {% block conteudo %}
 <h1>Resultado</h1>
-<p class="sub">Faturamento menos despesas de cada equipamento, e o acerto do lucro entre as duas empresas (50/50).</p>
+<p class="sub">Faturamento menos despesas de cada equipamento e despesas extras, e o acerto do lucro entre as duas empresas (50/50).</p>
+
+{% if request.query_params.get("criado") %}<div class="sucesso">Lançamento salvo com sucesso.</div>{% endif %}
 
 <div class="stat-row">
   <div class="stat"><div class="valor">R$ {{ "%.2f"|format(total_faturado) }}</div><div class="rotulo">Faturamento total</div></div>
-  <div class="stat"><div class="valor">R$ {{ "%.2f"|format(total_despesas) }}</div><div class="rotulo">Despesas totais</div></div>
-  <div class="stat"><div class="valor">R$ {{ "%.2f"|format(lucro_total) }}</div><div class="rotulo">Lucro total (faturamento - despesas)</div></div>
+  <div class="stat"><div class="valor">R$ {{ "%.2f"|format(total_despesas + total_extras_rtec + total_extras_eldorado) }}</div><div class="rotulo">Despesas totais (equipamentos + extras)</div></div>
+  <div class="stat"><div class="valor">R$ {{ "%.2f"|format(lucro_total) }}</div><div class="rotulo">Lucro total</div></div>
 </div>
 
 <div class="card">
@@ -765,19 +803,73 @@ TEMPLATES = {
 </div>
 
 <div class="card">
+  <h2>Despesas extras (não são de equipamento)</h2>
+  <p class="sub">Diesel, juros de financiamento, outros negócios etc. — cada empresa lança a sua em <a class="link-simples" href="/despesas-extras/novo">+ Despesa extra</a>. Entram no acerto abaixo.</p>
+  <div class="grid">
+    <div>
+      <h2 style="font-size:0.95rem;">RTEC Tratores <span class="badge">R$ {{ "%.2f"|format(total_extras_rtec) }}</span></h2>
+      <table>
+        <thead><tr><th>Data</th><th>Descrição</th><th class="num">Valor</th><th></th></tr></thead>
+        <tbody>
+          {% for x in extras_rtec %}
+          <tr>
+            <td>{{ x.data_despesa.strftime("%d/%m/%Y") }}</td>
+            <td>{{ x.descricao }}</td>
+            <td class="num">R$ {{ "%.2f"|format(x.valor) }}</td>
+            <td>
+              {% if x.usuario_id == user.id or user.is_admin %}
+              <form method="post" action="/despesas-extras/{{ x.id }}/excluir" onsubmit="return confirm('Excluir?');">
+                <button type="submit" class="botao perigo">Excluir</button>
+              </form>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+          {% if not extras_rtec %}<tr><td colspan="4" class="sub">Nenhuma.</td></tr>{% endif %}
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <h2 style="font-size:0.95rem;">Eldorado Serviços <span class="badge">R$ {{ "%.2f"|format(total_extras_eldorado) }}</span></h2>
+      <table>
+        <thead><tr><th>Data</th><th>Descrição</th><th class="num">Valor</th><th></th></tr></thead>
+        <tbody>
+          {% for x in extras_eldorado %}
+          <tr>
+            <td>{{ x.data_despesa.strftime("%d/%m/%Y") }}</td>
+            <td>{{ x.descricao }}</td>
+            <td class="num">R$ {{ "%.2f"|format(x.valor) }}</td>
+            <td>
+              {% if x.usuario_id == user.id or user.is_admin %}
+              <form method="post" action="/despesas-extras/{{ x.id }}/excluir" onsubmit="return confirm('Excluir?');">
+                <button type="submit" class="botao perigo">Excluir</button>
+              </form>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+          {% if not extras_eldorado %}<tr><td colspan="4" class="sub">Nenhuma.</td></tr>{% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="card">
   <h2>Acerto entre as empresas</h2>
-  <p class="sub">O lucro total é dividido meio a meio. Cada empresa desconta as despesas que ela mesma pagou e o que já recebeu diretamente (faturamento dos equipamentos que fatura). A diferença é o que falta acertar entre as duas.</p>
+  <p class="sub">O lucro total (faturamento − despesas de equipamento − despesas extras) é dividido meio a meio. Cada empresa desconta o que ela mesma pagou (equipamentos + extras) e o que já recebeu diretamente (faturamento dos equipamentos que fatura). A diferença é o que falta acertar entre as duas.</p>
   <table>
     <thead><tr><th></th><th class="num">RTEC Tratores</th><th class="num">Eldorado Serviços</th></tr></thead>
     <tbody>
-      <tr><td>Despesas pagas por ela</td><td class="num">R$ {{ "%.2f"|format(total_despesas_rtec) }}</td><td class="num">R$ {{ "%.2f"|format(total_despesas_eldorado) }}</td></tr>
+      <tr><td>Despesas de equipamentos pagas por ela</td><td class="num">R$ {{ "%.2f"|format(total_despesas_rtec) }}</td><td class="num">R$ {{ "%.2f"|format(total_despesas_eldorado) }}</td></tr>
+      <tr><td>+ Despesas extras pagas por ela</td><td class="num">R$ {{ "%.2f"|format(total_extras_rtec) }}</td><td class="num">R$ {{ "%.2f"|format(total_extras_eldorado) }}</td></tr>
       <tr><td>+ metade do lucro total</td><td class="num">R$ {{ "%.2f"|format(resultado_rtec) }}</td><td class="num">R$ {{ "%.2f"|format(resultado_eldorado) }}</td></tr>
       <tr><td><strong>= Total a receber</strong></td><td class="num"><strong>R$ {{ "%.2f"|format(a_receber_rtec) }}</strong></td><td class="num"><strong>R$ {{ "%.2f"|format(a_receber_eldorado) }}</strong></td></tr>
       <tr><td>Já recebido direto (equip. que fatura)</td><td class="num">R$ {{ "%.2f"|format(recebido_rtec) }}</td><td class="num">R$ {{ "%.2f"|format(recebido_eldorado) }}</td></tr>
       <tr><td><strong>= Diferença do acerto</strong></td><td class="num"><strong>R$ {{ "%.2f"|format(diferenca_rtec) }}</strong></td><td class="num"><strong>R$ {{ "%.2f"|format(diferenca_eldorado) }}</strong></td></tr>
     </tbody>
   </table>
-  <p class="sub" style="margin-top:12px;">Diferença positiva = essa empresa ainda tem a receber da outra. Não entram aqui itens fora de equipamentos (diesel, juros de financiamento, outros negócios) — esses continuam sendo acertados à parte, como já era.</p>
+  <p class="sub" style="margin-top:12px;">Diferença positiva = essa empresa ainda tem a receber da outra.</p>
 </div>
 {% endblock %}""",
 
@@ -1122,6 +1214,71 @@ def criar_faturamento(
     return RedirectResponse(url="/resultado?criado=1", status_code=303)
 
 
+# ---------------------------------------------------------------- despesas extras (não são de equipamento)
+@app.get("/despesas-extras/novo", response_class=HTMLResponse)
+def novo_despesa_extra_form(request: Request, db: Session = Depends(get_db)):
+    user = current_user(request, db)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    return render(
+        request, "despesa_extra_novo.html", user=user,
+        hoje=datetime.date.today().isoformat(), erro=None,
+    )
+
+
+@app.post("/despesas-extras/novo")
+def criar_despesa_extra(
+    request: Request,
+    data_despesa: str = Form(...),
+    descricao: str = Form(...),
+    valor: float = Form(...),
+    db: Session = Depends(get_db),
+):
+    user = current_user(request, db)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    erro = None
+    if valor < 0:
+        erro = "Valor não pode ser negativo."
+    if not descricao.strip():
+        erro = "Descrição é obrigatória."
+    try:
+        data_obj = datetime.date.fromisoformat(data_despesa)
+    except ValueError:
+        erro = "Data inválida."
+        data_obj = None
+
+    if erro:
+        return render(
+            request, "despesa_extra_novo.html", user=user,
+            hoje=datetime.date.today().isoformat(), erro=erro,
+        )
+
+    de = DespesaExtra(
+        usuario_id=user.id,
+        empresa=user.empresa,
+        data_despesa=data_obj,
+        descricao=descricao.strip(),
+        valor=valor,
+    )
+    db.add(de)
+    db.commit()
+    return RedirectResponse(url="/resultado?criado=1", status_code=303)
+
+
+@app.post("/despesas-extras/{despesa_extra_id}/excluir")
+def excluir_despesa_extra(despesa_extra_id: int, request: Request, db: Session = Depends(get_db)):
+    user = current_user(request, db)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    de = db.query(DespesaExtra).filter(DespesaExtra.id == despesa_extra_id).first()
+    if de and (de.usuario_id == user.id or user.is_admin):
+        db.delete(de)
+        db.commit()
+    return RedirectResponse(url="/resultado", status_code=303)
+
+
 # ---------------------------------------------------------------- resultado
 @app.get("/resultado", response_class=HTMLResponse)
 def resultado(request: Request, db: Session = Depends(get_db)):
@@ -1163,12 +1320,22 @@ def resultado(request: Request, db: Session = Depends(get_db)):
     total_despesas_rtec = sum(l["despesas_rtec"] for l in linhas)
     total_despesas_eldorado = sum(l["despesas_eldorado"] for l in linhas)
     total_despesas = total_despesas_rtec + total_despesas_eldorado
-    lucro_total = total_faturado - total_despesas
+
+    # despesas que não são de nenhum equipamento (diesel, juros, outros
+    # negócios etc.) - cada empresa lança a sua, mas entram no mesmo acerto
+    extras = db.query(DespesaExtra).order_by(DespesaExtra.data_despesa.desc(), DespesaExtra.criado_em.desc()).all()
+    extras_rtec = [x for x in extras if x.empresa == "RTEC TRATORES"]
+    extras_eldorado = [x for x in extras if x.empresa == "ELDORADO SERVIÇOS"]
+    total_extras_rtec = sum(x.valor for x in extras_rtec)
+    total_extras_eldorado = sum(x.valor for x in extras_eldorado)
+    total_extras = total_extras_rtec + total_extras_eldorado
+
+    lucro_total = total_faturado - total_despesas - total_extras
 
     resultado_rtec = lucro_total / 2
     resultado_eldorado = lucro_total / 2
-    a_receber_rtec = total_despesas_rtec + resultado_rtec
-    a_receber_eldorado = total_despesas_eldorado + resultado_eldorado
+    a_receber_rtec = total_despesas_rtec + total_extras_rtec + resultado_rtec
+    a_receber_eldorado = total_despesas_eldorado + total_extras_eldorado + resultado_eldorado
 
     recebido_rtec = sum(l["faturamento"] for l in linhas if l["equipamento"].empresa_faturamento == "RTEC TRATORES")
     recebido_eldorado = sum(l["faturamento"] for l in linhas if l["equipamento"].empresa_faturamento == "ELDORADO SERVIÇOS")
@@ -1180,6 +1347,8 @@ def resultado(request: Request, db: Session = Depends(get_db)):
         request, "resultado.html", user=user, linhas=linhas,
         total_faturado=total_faturado, total_despesas=total_despesas,
         total_despesas_rtec=total_despesas_rtec, total_despesas_eldorado=total_despesas_eldorado,
+        extras_rtec=extras_rtec, extras_eldorado=extras_eldorado,
+        total_extras_rtec=total_extras_rtec, total_extras_eldorado=total_extras_eldorado,
         lucro_total=lucro_total, resultado_rtec=resultado_rtec, resultado_eldorado=resultado_eldorado,
         a_receber_rtec=a_receber_rtec, a_receber_eldorado=a_receber_eldorado,
         recebido_rtec=recebido_rtec, recebido_eldorado=recebido_eldorado,
