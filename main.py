@@ -24,7 +24,7 @@ from fastapi.responses import RedirectResponse, StreamingResponse, HTMLResponse
 from starlette.middleware.sessions import SessionMiddleware
 from sqlalchemy import (
     create_engine, Column, Integer, String, Float, Boolean, DateTime, Date,
-    ForeignKey, Text, func,
+    ForeignKey, Text, func, text,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session
 from jinja2 import Environment, DictLoader, select_autoescape
@@ -55,6 +55,65 @@ CATEGORIAS = ["MÃO DE OBRA", "MANUTENÇÃO", "COMBUSTÍVEL", "OUTRAS DESPESAS"]
 IMPORT_USUARIOS = {
     "RTEC TRATORES": "importacao.rtec",
     "ELDORADO SERVIÇOS": "importacao.eldorado",
+}
+
+# Na planilha original, cada equipamento é faturado (cobrado do cliente) por
+# uma das duas empresas - é essa empresa que "recebe" o faturamento dele no
+# acerto mensal (independente de quem pagou as despesas daquele equipamento,
+# isso as duas podem fazer em qualquer máquina). Mapeamento copiado da divisão
+# real da aba RESULTADO (18 equipamentos faturados pela RTEC, 5 pela Eldorado).
+EQUIPAMENTOS_FATURAMENTO_EMPRESA = {
+    "CARREGADEIRA L60F": "RTEC TRATORES",
+    "ESCAVADEIRA VOLVO 21TON 05": "RTEC TRATORES",
+    "CAMINHÃO BROOK": "RTEC TRATORES",
+    "MOTONIVELADORA": "RTEC TRATORES",
+    "ROLO COMPACTADOR": "RTEC TRATORES",
+    "RETRO ESCAVADEIRA 02": "RTEC TRATORES",
+    "CAMINHÃO MUNCK TOCO": "RTEC TRATORES",
+    "ESCAVADEIRA HYUNDAI": "RTEC TRATORES",
+    "RETRO ESCAVADEIRA 10": "RTEC TRATORES",
+    "ESCAVADEIRA VOLVO 21TON 01": "RTEC TRATORES",
+    "ESCAVADEIRA VOLVO 21TON 02": "RTEC TRATORES",
+    "CAMINHÃO MUNCK 10TON": "RTEC TRATORES",
+    "RETRO ESCAVADEIRA 12": "RTEC TRATORES",
+    "RETRO ESCAVADEIRA 04": "RTEC TRATORES",
+    "RETRO ESCAVADEIRA 03": "RTEC TRATORES",
+    "RETRO ESCAVADEIRA 9": "RTEC TRATORES",
+    "CAMINHÃO PIPA TRUCK": "RTEC TRATORES",
+    "CAMINHÃO 3/4 COM MÓDULO": "RTEC TRATORES",
+    "RETRO ESCAVADEIRA 01": "ELDORADO SERVIÇOS",
+    "RETRO ESCAVADEIRA 14": "ELDORADO SERVIÇOS",
+    "MINI CARREGADEIRA": "ELDORADO SERVIÇOS",
+    "BROOK HEH7487": "ELDORADO SERVIÇOS",
+    "MINI RETROESCAVADEIRA NOVA": "ELDORADO SERVIÇOS",
+}
+
+# Faturamento real de julho/2026 (coluna VL. FATURADO da aba RESULTADO),
+# usado só na importação inicial via /admin/importar-planilha.
+FATURAMENTO_PLANILHA_JUL26 = {
+    "CARREGADEIRA L60F": 47900,
+    "ESCAVADEIRA VOLVO 21TON 05": 44010,
+    "CAMINHÃO BROOK": 20305,
+    "MOTONIVELADORA": 39250,
+    "ROLO COMPACTADOR": 36000,
+    "RETRO ESCAVADEIRA 02": 0,
+    "CAMINHÃO MUNCK TOCO": 26000,
+    "ESCAVADEIRA HYUNDAI": 52170,
+    "RETRO ESCAVADEIRA 10": 20764,
+    "ESCAVADEIRA VOLVO 21TON 01": 0,
+    "ESCAVADEIRA VOLVO 21TON 02": 0,
+    "CAMINHÃO MUNCK 10TON": 24734,
+    "RETRO ESCAVADEIRA 12": 19200,
+    "RETRO ESCAVADEIRA 04": 19407,
+    "RETRO ESCAVADEIRA 03": 19407,
+    "RETRO ESCAVADEIRA 9": 22351,
+    "CAMINHÃO PIPA TRUCK": 23700,
+    "CAMINHÃO 3/4 COM MÓDULO": 12800,
+    "RETRO ESCAVADEIRA 01": 14800,
+    "RETRO ESCAVADEIRA 14": 19361.67,
+    "MINI CARREGADEIRA": 18500,
+    "BROOK HEH7487": 19200,
+    "MINI RETROESCAVADEIRA NOVA": 18500,
 }
 
 # Copiado verbatim da aba RESULTADO da planilha original (EQUIPAMENTOS_JUL26) -
@@ -231,7 +290,11 @@ class Equipamento(Base):
     nome = Column(String(120), nullable=False)
     identificacao = Column(String(60), nullable=True)
     ativo = Column(Boolean, default=True)
+    # Qual das duas empresas fatura (cobra do cliente) esse equipamento -
+    # usado no Resultado para saber quem "recebeu" o faturamento dele.
+    empresa_faturamento = Column(String(40), nullable=True)
     lancamentos = relationship("Lancamento", back_populates="equipamento")
+    faturamentos = relationship("Faturamento", back_populates="equipamento")
 
     @property
     def rotulo(self):
@@ -255,10 +318,59 @@ class Lancamento(Base):
     equipamento = relationship("Equipamento", back_populates="lancamentos")
 
 
+class Faturamento(Base):
+    """Receita faturada de um equipamento (o que a planilha chamava de
+    VL. FATURADO). Lançado manualmente, um valor por vez, igual a uma
+    despesa - mas sem categoria nem empresa (a empresa é a do próprio
+    equipamento, ver Equipamento.empresa_faturamento)."""
+    __tablename__ = "faturamentos"
+    id = Column(Integer, primary_key=True)
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"), nullable=False)
+    equipamento_id = Column(Integer, ForeignKey("equipamentos.id"), nullable=False)
+    data_faturamento = Column(Date, nullable=False)
+    descricao = Column(Text, nullable=True)
+    valor = Column(Float, nullable=False, default=0)
+    criado_em = Column(DateTime, default=datetime.datetime.utcnow)
+    usuario = relationship("Usuario")
+    equipamento = relationship("Equipamento", back_populates="faturamentos")
+
+
 def seed(db: Session):
     if db.query(Equipamento).count() == 0:
         for nome, ident in EQUIPAMENTOS_SEED:
-            db.add(Equipamento(nome=nome, identificacao=ident))
+            db.add(Equipamento(
+                nome=nome, identificacao=ident,
+                empresa_faturamento=EQUIPAMENTOS_FATURAMENTO_EMPRESA.get(nome),
+            ))
+        db.commit()
+
+
+def migrar_schema(engine):
+    """Ajustes de schema em bancos que já existiam antes dessas mudanças
+    (create_all não altera tabelas já criadas, só cria as que faltam)."""
+    with engine.connect() as conn:
+        if engine.dialect.name == "postgresql":
+            conn.execute(text(
+                "ALTER TABLE equipamentos ADD COLUMN IF NOT EXISTS empresa_faturamento VARCHAR(40)"
+            ))
+            conn.commit()
+        else:
+            cols = [row[1] for row in conn.execute(text("PRAGMA table_info(equipamentos)"))]
+            if "empresa_faturamento" not in cols:
+                conn.execute(text("ALTER TABLE equipamentos ADD COLUMN empresa_faturamento VARCHAR(40)"))
+                conn.commit()
+
+
+def aplicar_empresa_faturamento_padrao(db: Session):
+    """Preenche empresa_faturamento pelos equipamentos que ainda não têm
+    (não sobrescreve o que já foi ajustado manualmente na tela Equipamentos)."""
+    mudou = False
+    for e in db.query(Equipamento).all():
+        alvo = EQUIPAMENTOS_FATURAMENTO_EMPRESA.get(e.nome)
+        if alvo and not e.empresa_faturamento:
+            e.empresa_faturamento = alvo
+            mudou = True
+    if mudou:
         db.commit()
 
 
@@ -323,8 +435,11 @@ TEMPLATES = {
     <nav class="abas">
       <a href="/">Resumo</a>
       <a href="/lancamentos">Lançamentos</a>
-      <a href="/lancamentos/novo">+ Novo lançamento</a>
+      <a href="/lancamentos/novo">+ Despesa</a>
+      <a href="/faturamentos/novo">+ Faturamento</a>
+      <a href="/resultado">Resultado</a>
       {% if user.is_admin %}<a href="/usuarios">Usuários</a>{% endif %}
+      {% if user.is_admin %}<a href="/equipamentos">Equipamentos</a>{% endif %}
       <a href="/logout">Sair ({{ user.nome }})</a>
     </nav>
   </header>
@@ -465,6 +580,31 @@ TEMPLATES = {
 </div>
 {% endblock %}""",
 
+    "faturamento_novo.html": """{% extends "base.html" %}
+{% block titulo %}Novo faturamento{% endblock %}
+{% block conteudo %}
+<div class="card" style="max-width:520px;">
+  <h1>Novo faturamento</h1>
+  <p class="sub">Valor faturado (cobrado do cliente) de um equipamento · lançado por {{ user.nome }}</p>
+  {% if erro %}<div class="erro">{{ erro }}</div>{% endif %}
+  <form method="post" action="/faturamentos/novo">
+    <label>Equipamento</label>
+    <select name="equipamento_id" required>
+      {% for e in equipamentos %}
+      <option value="{{ e.id }}">{{ e.rotulo }}{% if e.empresa_faturamento %} — faturado pela {{ e.empresa_faturamento }}{% endif %}</option>
+      {% endfor %}
+    </select>
+    <label>Data</label>
+    <input type="date" name="data_faturamento" value="{{ hoje }}" required>
+    <label>Descrição (opcional)</label>
+    <textarea name="descricao" placeholder="Ex.: faturamento de julho/2026"></textarea>
+    <label>Valor faturado (R$)</label>
+    <input type="number" name="valor" value="0" min="0" step="0.01" required>
+    <button type="submit">Lançar faturamento</button>
+  </form>
+</div>
+{% endblock %}""",
+
     "novo_lancamento.html": """{% extends "base.html" %}
 {% block titulo %}Novo lançamento{% endblock %}
 {% block conteudo %}
@@ -588,6 +728,88 @@ TEMPLATES = {
   </table>
 </div>
 {% endblock %}""",
+
+    "resultado.html": """{% extends "base.html" %}
+{% block titulo %}Resultado{% endblock %}
+{% block conteudo %}
+<h1>Resultado</h1>
+<p class="sub">Faturamento menos despesas de cada equipamento, e o acerto do lucro entre as duas empresas (50/50).</p>
+
+<div class="stat-row">
+  <div class="stat"><div class="valor">R$ {{ "%.2f"|format(total_faturado) }}</div><div class="rotulo">Faturamento total</div></div>
+  <div class="stat"><div class="valor">R$ {{ "%.2f"|format(total_despesas) }}</div><div class="rotulo">Despesas totais</div></div>
+  <div class="stat"><div class="valor">R$ {{ "%.2f"|format(lucro_total) }}</div><div class="rotulo">Lucro total (faturamento - despesas)</div></div>
+</div>
+
+<div class="card">
+  <h2>Por equipamento</h2>
+  <table>
+    <thead>
+      <tr><th>Equipamento</th><th>Faturado por</th><th class="num">Faturamento</th><th class="num">Despesas RTEC</th><th class="num">Despesas Eldorado</th><th class="num">Total despesas</th><th class="num">Resultado</th></tr>
+    </thead>
+    <tbody>
+      {% for l in linhas %}
+      <tr>
+        <td>{{ l.equipamento.rotulo }}</td>
+        <td>{{ l.equipamento.empresa_faturamento or "—" }}</td>
+        <td class="num">R$ {{ "%.2f"|format(l.faturamento) }}</td>
+        <td class="num">R$ {{ "%.2f"|format(l.despesas_rtec) }}</td>
+        <td class="num">R$ {{ "%.2f"|format(l.despesas_eldorado) }}</td>
+        <td class="num">R$ {{ "%.2f"|format(l.total_despesas) }}</td>
+        <td class="num"><strong>R$ {{ "%.2f"|format(l.resultado) }}</strong></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if not linhas %}<p class="sub" style="margin-top:12px;">Nenhum equipamento cadastrado.</p>{% endif %}
+</div>
+
+<div class="card">
+  <h2>Acerto entre as empresas</h2>
+  <p class="sub">O lucro total é dividido meio a meio. Cada empresa desconta as despesas que ela mesma pagou e o que já recebeu diretamente (faturamento dos equipamentos que fatura). A diferença é o que falta acertar entre as duas.</p>
+  <table>
+    <thead><tr><th></th><th class="num">RTEC Tratores</th><th class="num">Eldorado Serviços</th></tr></thead>
+    <tbody>
+      <tr><td>Despesas pagas por ela</td><td class="num">R$ {{ "%.2f"|format(total_despesas_rtec) }}</td><td class="num">R$ {{ "%.2f"|format(total_despesas_eldorado) }}</td></tr>
+      <tr><td>+ metade do lucro total</td><td class="num">R$ {{ "%.2f"|format(resultado_rtec) }}</td><td class="num">R$ {{ "%.2f"|format(resultado_eldorado) }}</td></tr>
+      <tr><td><strong>= Total a receber</strong></td><td class="num"><strong>R$ {{ "%.2f"|format(a_receber_rtec) }}</strong></td><td class="num"><strong>R$ {{ "%.2f"|format(a_receber_eldorado) }}</strong></td></tr>
+      <tr><td>Já recebido direto (equip. que fatura)</td><td class="num">R$ {{ "%.2f"|format(recebido_rtec) }}</td><td class="num">R$ {{ "%.2f"|format(recebido_eldorado) }}</td></tr>
+      <tr><td><strong>= Diferença do acerto</strong></td><td class="num"><strong>R$ {{ "%.2f"|format(diferenca_rtec) }}</strong></td><td class="num"><strong>R$ {{ "%.2f"|format(diferenca_eldorado) }}</strong></td></tr>
+    </tbody>
+  </table>
+  <p class="sub" style="margin-top:12px;">Diferença positiva = essa empresa ainda tem a receber da outra. Não entram aqui itens fora de equipamentos (diesel, juros de financiamento, outros negócios) — esses continuam sendo acertados à parte, como já era.</p>
+</div>
+{% endblock %}""",
+
+    "equipamentos.html": """{% extends "base.html" %}
+{% block titulo %}Equipamentos{% endblock %}
+{% block conteudo %}
+<h1>Equipamentos</h1>
+<p class="sub">Qual empresa fatura (cobra do cliente) cada equipamento - usado na tela Resultado.</p>
+{% if sucesso %}<div class="sucesso">Atualizado.</div>{% endif %}
+<div class="card">
+  <table>
+    <thead><tr><th>Equipamento</th><th>Identificação</th><th>Faturado por</th><th></th></tr></thead>
+    <tbody>
+      {% for e in equipamentos %}
+      <tr>
+        <td>{{ e.nome }}</td>
+        <td>{{ e.identificacao or "" }}</td>
+        <td>{{ e.empresa_faturamento or "não definido" }}</td>
+        <td>
+          <form method="post" action="/equipamentos/{{ e.id }}/empresa-faturamento" style="display:flex;gap:6px;align-items:center;">
+            <select name="empresa_faturamento" style="width:auto;min-width:170px;">
+              {% for emp in empresas %}<option value="{{ emp }}" {% if e.empresa_faturamento==emp %}selected{% endif %}>{{ emp }}</option>{% endfor %}
+            </select>
+            <button type="submit" style="margin-top:0;padding:6px 12px;font-size:0.85rem;">Salvar</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}""",
 }
 
 jinja_env = Environment(loader=DictLoader(TEMPLATES), autoescape=select_autoescape(["html"]))
@@ -610,9 +832,11 @@ app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, same_site="lax")
 @app.on_event("startup")
 def on_startup():
     Base.metadata.create_all(bind=engine)
+    migrar_schema(engine)
     db = SessionLocal()
     try:
         seed(db)
+        aplicar_empresa_faturamento_padrao(db)
     finally:
         db.close()
 
@@ -841,6 +1065,128 @@ def excluir_lancamento(lancamento_id: int, request: Request, db: Session = Depen
     return RedirectResponse(url="/lancamentos", status_code=303)
 
 
+# ---------------------------------------------------------------- faturamento
+@app.get("/faturamentos/novo", response_class=HTMLResponse)
+def novo_faturamento_form(request: Request, db: Session = Depends(get_db)):
+    user = current_user(request, db)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    equipamentos = db.query(Equipamento).filter(Equipamento.ativo == True).order_by(Equipamento.nome).all()  # noqa: E712
+    return render(
+        request, "faturamento_novo.html", user=user, equipamentos=equipamentos,
+        hoje=datetime.date.today().isoformat(), erro=None,
+    )
+
+
+@app.post("/faturamentos/novo")
+def criar_faturamento(
+    request: Request,
+    equipamento_id: int = Form(...),
+    data_faturamento: str = Form(...),
+    descricao: str = Form(""),
+    valor: float = Form(...),
+    db: Session = Depends(get_db),
+):
+    user = current_user(request, db)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    equipamentos = db.query(Equipamento).filter(Equipamento.ativo == True).order_by(Equipamento.nome).all()  # noqa: E712
+    erro = None
+    equip = db.query(Equipamento).filter(Equipamento.id == equipamento_id).first()
+    if not equip:
+        erro = "Equipamento inválido."
+    if valor < 0:
+        erro = "Valor não pode ser negativo."
+    try:
+        data_obj = datetime.date.fromisoformat(data_faturamento)
+    except ValueError:
+        erro = "Data inválida."
+        data_obj = None
+
+    if erro:
+        return render(
+            request, "faturamento_novo.html", user=user, equipamentos=equipamentos,
+            hoje=datetime.date.today().isoformat(), erro=erro,
+        )
+
+    fat = Faturamento(
+        usuario_id=user.id,
+        equipamento_id=equip.id,
+        data_faturamento=data_obj,
+        descricao=descricao.strip() or None,
+        valor=valor,
+    )
+    db.add(fat)
+    db.commit()
+    return RedirectResponse(url="/resultado?criado=1", status_code=303)
+
+
+# ---------------------------------------------------------------- resultado
+@app.get("/resultado", response_class=HTMLResponse)
+def resultado(request: Request, db: Session = Depends(get_db)):
+    user = current_user(request, db)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    equipamentos = db.query(Equipamento).filter(Equipamento.ativo == True).order_by(Equipamento.nome).all()  # noqa: E712
+
+    faturamento_por_equip = dict(
+        db.query(Faturamento.equipamento_id, func.sum(Faturamento.valor))
+        .group_by(Faturamento.equipamento_id).all()
+    )
+    despesas_por_equip_empresa = (
+        db.query(Lancamento.equipamento_id, Lancamento.empresa, func.sum(Lancamento.valor_total))
+        .group_by(Lancamento.equipamento_id, Lancamento.empresa).all()
+    )
+    despesas_rtec_por_equip = {}
+    despesas_eldorado_por_equip = {}
+    for equip_id, emp, total in despesas_por_equip_empresa:
+        if emp == "RTEC TRATORES":
+            despesas_rtec_por_equip[equip_id] = total or 0.0
+        elif emp == "ELDORADO SERVIÇOS":
+            despesas_eldorado_por_equip[equip_id] = total or 0.0
+
+    linhas = []
+    for e in equipamentos:
+        faturamento = faturamento_por_equip.get(e.id, 0.0) or 0.0
+        desp_rtec = despesas_rtec_por_equip.get(e.id, 0.0) or 0.0
+        desp_eldo = despesas_eldorado_por_equip.get(e.id, 0.0) or 0.0
+        total_despesas = desp_rtec + desp_eldo
+        linhas.append({
+            "equipamento": e, "faturamento": faturamento,
+            "despesas_rtec": desp_rtec, "despesas_eldorado": desp_eldo,
+            "total_despesas": total_despesas, "resultado": faturamento - total_despesas,
+        })
+
+    total_faturado = sum(l["faturamento"] for l in linhas)
+    total_despesas_rtec = sum(l["despesas_rtec"] for l in linhas)
+    total_despesas_eldorado = sum(l["despesas_eldorado"] for l in linhas)
+    total_despesas = total_despesas_rtec + total_despesas_eldorado
+    lucro_total = total_faturado - total_despesas
+
+    resultado_rtec = lucro_total / 2
+    resultado_eldorado = lucro_total / 2
+    a_receber_rtec = total_despesas_rtec + resultado_rtec
+    a_receber_eldorado = total_despesas_eldorado + resultado_eldorado
+
+    recebido_rtec = sum(l["faturamento"] for l in linhas if l["equipamento"].empresa_faturamento == "RTEC TRATORES")
+    recebido_eldorado = sum(l["faturamento"] for l in linhas if l["equipamento"].empresa_faturamento == "ELDORADO SERVIÇOS")
+
+    diferenca_rtec = a_receber_rtec - recebido_rtec
+    diferenca_eldorado = a_receber_eldorado - recebido_eldorado
+
+    return render(
+        request, "resultado.html", user=user, linhas=linhas,
+        total_faturado=total_faturado, total_despesas=total_despesas,
+        total_despesas_rtec=total_despesas_rtec, total_despesas_eldorado=total_despesas_eldorado,
+        lucro_total=lucro_total, resultado_rtec=resultado_rtec, resultado_eldorado=resultado_eldorado,
+        a_receber_rtec=a_receber_rtec, a_receber_eldorado=a_receber_eldorado,
+        recebido_rtec=recebido_rtec, recebido_eldorado=recebido_eldorado,
+        diferenca_rtec=diferenca_rtec, diferenca_eldorado=diferenca_eldorado,
+    )
+
+
 @app.get("/lancamentos/exportar.csv")
 def exportar_csv(request: Request, db: Session = Depends(get_db)):
     user = current_user(request, db)
@@ -887,6 +1233,33 @@ def alternar_usuario(usuario_id: int, request: Request, db: Session = Depends(ge
     return RedirectResponse(url="/usuarios", status_code=303)
 
 
+# ---------------------------------------------------------------- admin: equipamentos
+@app.get("/equipamentos", response_class=HTMLResponse)
+def listar_equipamentos(request: Request, db: Session = Depends(get_db)):
+    user = current_user(request, db)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Só administradores podem ver essa página.")
+    equipamentos = db.query(Equipamento).order_by(Equipamento.nome).all()
+    return render(request, "equipamentos.html", user=user, equipamentos=equipamentos, empresas=EMPRESAS, sucesso=False)
+
+
+@app.post("/equipamentos/{equipamento_id}/empresa-faturamento")
+def alterar_empresa_faturamento(
+    equipamento_id: int, request: Request,
+    empresa_faturamento: str = Form(...), db: Session = Depends(get_db),
+):
+    user = current_user(request, db)
+    if not user or not user.is_admin:
+        raise HTTPException(status_code=403, detail="Só administradores podem fazer isso.")
+    equip = db.query(Equipamento).filter(Equipamento.id == equipamento_id).first()
+    if equip and empresa_faturamento in EMPRESAS:
+        equip.empresa_faturamento = empresa_faturamento
+        db.commit()
+    return RedirectResponse(url="/equipamentos", status_code=303)
+
+
 # ---------------------------------------------------------------- admin: importação da planilha
 @app.get("/admin/importar-planilha")
 def importar_planilha(token: str, db: Session = Depends(get_db)):
@@ -917,6 +1290,7 @@ def importar_planilha(token: str, db: Session = Depends(get_db)):
     # insere de novo, sem duplicar. Não mexe em lançamentos feitos por pessoas.
     ids_importacao = [u.id for u in usuarios_importacao.values()]
     db.query(Lancamento).filter(Lancamento.usuario_id.in_(ids_importacao)).delete(synchronize_session=False)
+    db.query(Faturamento).filter(Faturamento.usuario_id.in_(ids_importacao)).delete(synchronize_session=False)
     db.commit()
 
     inseridos = 0
@@ -943,9 +1317,30 @@ def importar_planilha(token: str, db: Session = Depends(get_db)):
         totais_empresa[item["empresa"]] += item["valor_total"]
     db.commit()
 
+    faturamentos_inseridos = 0
+    total_faturado = 0.0
+    for nome, valor in FATURAMENTO_PLANILHA_JUL26.items():
+        equip = equipamentos_por_nome.get(nome)
+        if not equip:
+            continue
+        empresa_alvo = equip.empresa_faturamento or EQUIPAMENTOS_FATURAMENTO_EMPRESA.get(nome) or EMPRESAS[0]
+        fat = Faturamento(
+            usuario_id=usuarios_importacao[empresa_alvo].id,
+            equipamento_id=equip.id,
+            data_faturamento=datetime.date(2026, 7, 31),
+            descricao="Faturamento de julho/2026 (planilha original)",
+            valor=valor,
+        )
+        db.add(fat)
+        faturamentos_inseridos += 1
+        total_faturado += valor
+    db.commit()
+
     return {
         "ok": True,
         "lancamentos_inseridos": inseridos,
         "ignorados": len(ignorados),
         "totais_por_empresa": {k: round(v, 2) for k, v in totais_empresa.items()},
+        "faturamentos_inseridos": faturamentos_inseridos,
+        "total_faturado": round(total_faturado, 2),
     }
