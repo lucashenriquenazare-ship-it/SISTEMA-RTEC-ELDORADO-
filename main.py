@@ -116,6 +116,34 @@ FATURAMENTO_PLANILHA_JUL26 = {
     "MINI RETROESCAVADEIRA NOVA": 18500,
 }
 
+# Itens soltos que aparecem embaixo da aba RESULTADO (linhas 36-56), fora de
+# qualquer fórmula que soma no total oficial (I33/F35/I35/F38/I38 - conferido
+# célula a célula, nenhum desses cai ali). São conferências/avisos: diesel,
+# juros de financiamento de equipamento, resultado de outros imóveis (BMS),
+# parcela etc. Por não terem fórmula de soma ligada ao Resultado, entram só
+# como Observação (referência), nunca no cálculo do acerto entre as empresas.
+# Itens de OUTROS NEGÓCIOS (RL, RL SUDESTE, RTEC SUDESTE, GG, básculas, MOTO,
+# PIPA - colunas E a H da planilha) ficam de fora até deste registro, por
+# serem de outra sociedade, sem relação com RTEC Tratores/Eldorado Serviços.
+OBSERVACOES_PLANILHA_JUL26 = [
+    {"empresa": "RTEC TRATORES", "descricao": "DIESEL RTEC", "valor": 18020.16},
+    {"empresa": None, "descricao": "ACERTO HIG JUL2026", "valor": 2277.05},
+    {"empresa": "ELDORADO SERVIÇOS", "descricao": "DESPESAS ELDORADO (ref. aba DESPESAS da planilha)", "valor": -1612.32},
+    {"empresa": "RTEC TRATORES", "descricao": "RESULTADO RTEC BMS 46 MAI SINARCO", "valor": 0},
+    {"empresa": "RTEC TRATORES", "descricao": "RESULTADO RTEC BMS 17 MAI SINARCO 406", "valor": 0},
+    {"empresa": "RTEC TRATORES", "descricao": "DIESEL PAGO PELA RTEC (03/07, 14/07, 21/07, 30/07)", "valor": 119600},
+    {"empresa": None, "descricao": "RESULTADO QUANTUM BMS 18 (JUN)", "valor": 60200.77},
+    {"empresa": None, "descricao": "DIFERENÇA RT 12 JULHO2026", "valor": 2578.27},
+    {"empresa": None, "descricao": "JUROS 2% ESC EC220D - financiamento R$ 150.000,00", "valor": 3000},
+    {"empresa": None, "descricao": "JUROS 2% MUNCK - financiamento R$ 135.000,00", "valor": 2700},
+    {"empresa": None, "descricao": "JUROS 2% 3/4 JR - financiamento R$ 62.500,00", "valor": 1250},
+    {"empresa": None, "descricao": "JUROS 2% PIPA - financiamento R$ 150.000,00", "valor": 3000},
+    {"empresa": None, "descricao": "JUROS 2% ROLO - financiamento R$ 147.500,00", "valor": 2950},
+    {"empresa": None, "descricao": "PARCELA L120 10/10", "valor": 5000},
+    {"empresa": None, "descricao": "RESULTADO ITAMARACÁ - BMS JUL", "valor": 34956.51},
+    {"empresa": None, "descricao": "GG", "valor": 6000},
+]
+
 # Copiado verbatim da aba RESULTADO da planilha original (EQUIPAMENTOS_JUL26) -
 # nada foi inventado aqui.
 EQUIPAMENTOS_SEED = [
@@ -351,6 +379,23 @@ class DespesaExtra(Base):
     usuario = relationship("Usuario")
 
 
+class Observacao(Base):
+    """Anotação de conferência/aviso - valores que aparecem soltos na
+    planilha original (fora de qualquer fórmula que soma no Resultado),
+    tipo checagens de recebíveis, resultados de outros negócios, etc.
+    Fica só como referência: NÃO entra em nenhuma conta do sistema
+    (nem no Resumo, nem no acerto do Resultado)."""
+    __tablename__ = "observacoes"
+    id = Column(Integer, primary_key=True)
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"), nullable=False)
+    empresa = Column(String(40), nullable=True)  # pode ser geral (nenhuma das duas)
+    data_referencia = Column(Date, nullable=True)
+    descricao = Column(Text, nullable=False)
+    valor = Column(Float, nullable=True)
+    criado_em = Column(DateTime, default=datetime.datetime.utcnow)
+    usuario = relationship("Usuario")
+
+
 def seed(db: Session):
     if db.query(Equipamento).count() == 0:
         for nome, ident in EQUIPAMENTOS_SEED:
@@ -454,6 +499,7 @@ TEMPLATES = {
       <a href="/lancamentos/novo">+ Despesa</a>
       <a href="/faturamentos/novo">+ Faturamento</a>
       <a href="/despesas-extras/novo">+ Despesa extra</a>
+      <a href="/observacoes/novo">+ Observação</a>
       <a href="/resultado">Resultado</a>
       {% if user.is_admin %}<a href="/usuarios">Usuários</a>{% endif %}
       {% if user.is_admin %}<a href="/equipamentos">Equipamentos</a>{% endif %}
@@ -637,6 +683,31 @@ TEMPLATES = {
     <label>Valor (R$)</label>
     <input type="number" name="valor" value="0" min="0" step="0.01" required>
     <button type="submit">Lançar despesa</button>
+  </form>
+</div>
+{% endblock %}""",
+
+    "observacao_novo.html": """{% extends "base.html" %}
+{% block titulo %}Nova observação{% endblock %}
+{% block conteudo %}
+<div class="card" style="max-width:520px;">
+  <h1>Nova observação</h1>
+  <p class="sub">Anotação/aviso de conferência (ex.: valor a receber de outro negócio, resultado de outro imóvel, ajuste pendente). <strong>Não entra em nenhuma conta do sistema</strong> — fica só como referência na tela Resultado. Lançado por {{ user.nome }}.</p>
+  {% if erro %}<div class="erro">{{ erro }}</div>{% endif %}
+  <form method="post" action="/observacoes/novo">
+    <label>Empresa (opcional)</label>
+    <select name="empresa">
+      <option value="">Geral (nenhuma das duas)</option>
+      <option value="RTEC TRATORES">RTEC TRATORES</option>
+      <option value="ELDORADO SERVIÇOS">ELDORADO SERVIÇOS</option>
+    </select>
+    <label>Data de referência (opcional)</label>
+    <input type="date" name="data_referencia">
+    <label>Descrição</label>
+    <textarea name="descricao" required placeholder="Ex.: resultado BMS imóvel X, valor a receber de outro negócio"></textarea>
+    <label>Valor (opcional, R$)</label>
+    <input type="number" name="valor" step="0.01" placeholder="Deixe em branco se não tiver valor">
+    <button type="submit">Salvar observação</button>
   </form>
 </div>
 {% endblock %}""",
@@ -853,6 +924,32 @@ TEMPLATES = {
       </table>
     </div>
   </div>
+</div>
+
+<div class="card">
+  <h2>Observações <span class="sub" style="font-weight:normal;">(conferência/aviso — não entra em nenhuma conta)</span></h2>
+  <p class="sub">Anotações soltas tipo valores a receber de outros negócios, resultado de outros imóveis, ajustes pendentes etc. Lance em <a class="link-simples" href="/observacoes/novo">+ Observação</a>. Não afeta o Resumo nem o acerto abaixo.</p>
+  <table>
+    <thead><tr><th>Data</th><th>Empresa</th><th>Descrição</th><th class="num">Valor</th><th></th></tr></thead>
+    <tbody>
+      {% for o in observacoes %}
+      <tr>
+        <td>{{ o.data_referencia.strftime("%d/%m/%Y") if o.data_referencia else "—" }}</td>
+        <td>{{ o.empresa or "Geral" }}</td>
+        <td>{{ o.descricao }}</td>
+        <td class="num">{{ "R$ %.2f"|format(o.valor) if o.valor is not none else "—" }}</td>
+        <td>
+          {% if o.usuario_id == user.id or user.is_admin %}
+          <form method="post" action="/observacoes/{{ o.id }}/excluir" onsubmit="return confirm('Excluir?');">
+            <button type="submit" class="botao perigo">Excluir</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+      {% if not observacoes %}<tr><td colspan="5" class="sub">Nenhuma.</td></tr>{% endif %}
+    </tbody>
+  </table>
 </div>
 
 <div class="card">
@@ -1279,6 +1376,77 @@ def excluir_despesa_extra(despesa_extra_id: int, request: Request, db: Session =
     return RedirectResponse(url="/resultado", status_code=303)
 
 
+# ---------------------------------------------------------------- observações (não entram em nenhuma conta)
+@app.get("/observacoes/novo", response_class=HTMLResponse)
+def nova_observacao_form(request: Request, db: Session = Depends(get_db)):
+    user = current_user(request, db)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    return render(
+        request, "observacao_novo.html", user=user,
+        hoje=datetime.date.today().isoformat(), erro=None,
+    )
+
+
+@app.post("/observacoes/novo")
+def criar_observacao(
+    request: Request,
+    empresa: str = Form(""),
+    data_referencia: str = Form(""),
+    descricao: str = Form(...),
+    valor: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    user = current_user(request, db)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    erro = None
+    if not descricao.strip():
+        erro = "Descrição é obrigatória."
+    data_obj = None
+    if data_referencia:
+        try:
+            data_obj = datetime.date.fromisoformat(data_referencia)
+        except ValueError:
+            erro = "Data inválida."
+    valor_obj = None
+    if valor.strip():
+        try:
+            valor_obj = float(valor.replace(",", "."))
+        except ValueError:
+            erro = "Valor inválido."
+
+    if erro:
+        return render(
+            request, "observacao_novo.html", user=user,
+            hoje=datetime.date.today().isoformat(), erro=erro,
+        )
+
+    obs = Observacao(
+        usuario_id=user.id,
+        empresa=empresa if empresa in EMPRESAS else None,
+        data_referencia=data_obj,
+        descricao=descricao.strip(),
+        valor=valor_obj,
+    )
+    db.add(obs)
+    db.commit()
+    return RedirectResponse(url="/resultado?criado=1", status_code=303)
+
+
+@app.post("/observacoes/{observacao_id}/excluir")
+def excluir_observacao(observacao_id: int, request: Request, db: Session = Depends(get_db)):
+    user = current_user(request, db)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    obs = db.query(Observacao).filter(Observacao.id == observacao_id).first()
+    if obs and (obs.usuario_id == user.id or user.is_admin):
+        db.delete(obs)
+        db.commit()
+    return RedirectResponse(url="/resultado", status_code=303)
+
+
 # ---------------------------------------------------------------- resultado
 @app.get("/resultado", response_class=HTMLResponse)
 def resultado(request: Request, db: Session = Depends(get_db)):
@@ -1343,6 +1511,9 @@ def resultado(request: Request, db: Session = Depends(get_db)):
     diferenca_rtec = a_receber_rtec - recebido_rtec
     diferenca_eldorado = a_receber_eldorado - recebido_eldorado
 
+    # observações: só referência/conferência, não entram em nenhuma conta acima
+    observacoes = db.query(Observacao).order_by(Observacao.criado_em.desc()).all()
+
     return render(
         request, "resultado.html", user=user, linhas=linhas,
         total_faturado=total_faturado, total_despesas=total_despesas,
@@ -1353,6 +1524,7 @@ def resultado(request: Request, db: Session = Depends(get_db)):
         a_receber_rtec=a_receber_rtec, a_receber_eldorado=a_receber_eldorado,
         recebido_rtec=recebido_rtec, recebido_eldorado=recebido_eldorado,
         diferenca_rtec=diferenca_rtec, diferenca_eldorado=diferenca_eldorado,
+        observacoes=observacoes,
     )
 
 
@@ -1460,6 +1632,7 @@ def importar_planilha(token: str, db: Session = Depends(get_db)):
     ids_importacao = [u.id for u in usuarios_importacao.values()]
     db.query(Lancamento).filter(Lancamento.usuario_id.in_(ids_importacao)).delete(synchronize_session=False)
     db.query(Faturamento).filter(Faturamento.usuario_id.in_(ids_importacao)).delete(synchronize_session=False)
+    db.query(Observacao).filter(Observacao.usuario_id.in_(ids_importacao)).delete(synchronize_session=False)
     db.commit()
 
     inseridos = 0
@@ -1505,6 +1678,24 @@ def importar_planilha(token: str, db: Session = Depends(get_db)):
         total_faturado += valor
     db.commit()
 
+    # itens de conferência/aviso da planilha (fora de qualquer fórmula que
+    # soma no Resultado) - entram só como Observação, não afetam nenhuma conta
+    observacoes_inseridas = 0
+    usuario_import_padrao = usuarios_importacao[EMPRESAS[0]]
+    for item in OBSERVACOES_PLANILHA_JUL26:
+        empresa_item = item["empresa"]
+        usuario_obs = usuarios_importacao.get(empresa_item, usuario_import_padrao)
+        obs = Observacao(
+            usuario_id=usuario_obs.id,
+            empresa=empresa_item,
+            data_referencia=datetime.date(2026, 7, 31),
+            descricao=item["descricao"] + " (importado da planilha - conferência)",
+            valor=item["valor"],
+        )
+        db.add(obs)
+        observacoes_inseridas += 1
+    db.commit()
+
     return {
         "ok": True,
         "lancamentos_inseridos": inseridos,
@@ -1512,4 +1703,5 @@ def importar_planilha(token: str, db: Session = Depends(get_db)):
         "totais_por_empresa": {k: round(v, 2) for k, v in totais_empresa.items()},
         "faturamentos_inseridos": faturamentos_inseridos,
         "total_faturado": round(total_faturado, 2),
+        "observacoes_inseridas": observacoes_inseridas,
     }
